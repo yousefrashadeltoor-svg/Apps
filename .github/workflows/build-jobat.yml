@@ -1,0 +1,90 @@
+name: Build JObat Android APK
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-jobat.yml'
+      - 'android-document-reader-development.zip'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK, NDK and CMake
+        uses: android-actions/setup-android@v3
+      - name: Install Android build components
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" "ndk;27.2.12479018" "cmake;3.22.1"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Extract selected native Android project
+        run: |
+          mkdir -p candidate
+          unzip -q android-document-reader-development.zip -d candidate
+          test -f candidate/JObat/settings.gradle.kts
+          test -f candidate/JObat/app/src/main/AndroidManifest.xml
+
+      - name: Generate Gradle wrapper
+        working-directory: candidate/JObat
+        run: |
+          gradle wrapper --gradle-version 8.9
+          chmod +x gradlew
+
+      - name: Run unit tests and assemble release APKs
+        working-directory: candidate/JObat
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_HOME }}
+        run: |
+          ./gradlew --no-daemon --stacktrace clean testDebugUnitTest assembleRelease
+
+      - name: Verify APK outputs
+        if: success()
+        run: |
+          set -e
+          find candidate/JObat/app/build/outputs/apk/release -type f -name '*.apk' -print
+          test -n "$(find candidate/JObat/app/build/outputs/apk/release -type f -name '*.apk' -print -quit)"
+          for apk in candidate/JObat/app/build/outputs/apk/release/*.apk; do
+            [ -f "$apk" ] || continue
+            echo "== $apk =="
+            file "$apk"
+            sha256sum "$apk"
+          done
+
+      - name: Upload release APKs
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jobat-release-apks
+          path: candidate/JObat/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jobat-build-diagnostics
+          path: |
+            candidate/JObat/app/build/reports/
+            candidate/JObat/*/build/reports/
+            candidate/JObat/build/
+          if-no-files-found: ignore
+          retention-days: 7
