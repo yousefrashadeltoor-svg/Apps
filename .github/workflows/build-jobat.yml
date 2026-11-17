@@ -44,6 +44,58 @@ jobs:
           test -f candidate/JObat/settings.gradle.kts
           test -f candidate/JObat/app/src/main/AndroidManifest.xml
 
+      - name: Repair missing bundled font resources
+        run: |
+          cat > candidate/JObat/design-system/src/main/kotlin/com/jobat/design/theme/Type.kt <<'KOTLIN'
+          package com.jobat.design.theme
+
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.Shapes
+          import androidx.compose.material3.Typography
+          import androidx.compose.ui.text.TextStyle
+          import androidx.compose.ui.text.font.FontFamily
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.unit.sp
+
+          // The source archive references font resources that are not included in the ZIP.
+          // Use Android's bundled type families so the app remains fully offline and builds reliably.
+          val DisplayFamily = FontFamily.Serif
+          val UiFamily = FontFamily.SansSerif
+          val UiArabicFamily = FontFamily.SansSerif
+
+          private fun style(family: FontFamily, size: Int, line: Int, weight: Int, tracking: Float) = TextStyle(
+              fontFamily = family,
+              fontSize = size.sp,
+              lineHeight = line.sp,
+              fontWeight = FontWeight(weight),
+              letterSpacing = tracking.sp,
+          )
+
+          private fun fam(key: String) = if (key == "display") DisplayFamily else UiFamily
+
+          val JoBatTypography = with(JoBatTokens.Type) {
+              Typography(
+                  displayLarge = style(fam(displayLargeFamily), displayLargeSize.value.toInt(), displayLargeLine.value.toInt(), displayLargeWeight, displayLargeTracking.value),
+                  displaySmall = style(fam(displaySmallFamily), displaySmallSize.value.toInt(), displaySmallLine.value.toInt(), displaySmallWeight, displaySmallTracking.value),
+                  headlineMedium = style(fam(headlineMediumFamily), headlineMediumSize.value.toInt(), headlineMediumLine.value.toInt(), headlineMediumWeight, headlineMediumTracking.value),
+                  titleLarge = style(fam(titleLargeFamily), titleLargeSize.value.toInt(), titleLargeLine.value.toInt(), titleLargeWeight, titleLargeTracking.value),
+                  titleMedium = style(fam(titleMediumFamily), titleMediumSize.value.toInt(), titleMediumLine.value.toInt(), titleMediumWeight, titleMediumTracking.value),
+                  bodyLarge = style(fam(bodyLargeFamily), bodyLargeSize.value.toInt(), bodyLargeLine.value.toInt(), bodyLargeWeight, bodyLargeTracking.value),
+                  bodyMedium = style(fam(bodyMediumFamily), bodyMediumSize.value.toInt(), bodyMediumLine.value.toInt(), bodyMediumWeight, bodyMediumTracking.value),
+                  labelLarge = style(fam(labelLargeFamily), labelLargeSize.value.toInt(), labelLargeLine.value.toInt(), labelLargeWeight, labelLargeTracking.value),
+                  labelSmall = style(fam(labelSmallFamily), labelSmallSize.value.toInt(), labelSmallLine.value.toInt(), labelSmallWeight, labelSmallTracking.value),
+              )
+          }
+
+          val JoBatShapes = Shapes(
+              extraSmall = RoundedCornerShape(JoBatTokens.Radius.sm),
+              small = RoundedCornerShape(JoBatTokens.Radius.sm),
+              medium = RoundedCornerShape(JoBatTokens.Radius.md),
+              large = RoundedCornerShape(JoBatTokens.Radius.lg),
+              extraLarge = RoundedCornerShape(JoBatTokens.Radius.xl),
+          )
+          KOTLIN
+
       - name: Generate Gradle wrapper
         working-directory: candidate/JObat
         run: |
