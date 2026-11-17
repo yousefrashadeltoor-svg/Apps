@@ -1,0 +1,86 @@
+name: Audit all account app archives
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/account-app-inventory.yml'
+permissions:
+  contents: read
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Audit public app repositories
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, re, zipfile, io, urllib.request
+          from pathlib import Path
+
+          repos = ["JODOW", "JO-DOW", "dayflow", "Multiple-copies-dayflow", "JOSEPH", "-don.-Muse", "Apps"]
+          base = Path("account-app-inventory")
+          base.mkdir(exist_ok=True)
+          report = ["# Account app archive inventory", "", "Public repositories and root-level ZIP archives.", ""]
+          details = []
+          headers = {"Accept": "application/vnd.github+json", "User-Agent": "account-app-audit"}
+
+          def get(url):
+              req = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(req, timeout=60) as r:
+                  return r.read()
+
+          for repo in repos:
+              report += [f"## {repo}", ""]
+              try:
+                  entries = json.loads(get(f"https://api.github.com/repos/yousefrashadeltoor-svg/{repo}/contents"))
+              except Exception as e:
+                  report += [f"- Could not list repository: {e}", ""]
+                  continue
+              archives = [x for x in entries if x.get("type") == "file" and x.get("name", "").lower().endswith(".zip")]
+              if not archives:
+                  report += ["- No root-level ZIP archives found.", ""]
+                  continue
+              for item in archives:
+                  name = item["name"]
+                  rel = re.sub(r"[^A-Za-z0-9._-]+", "_", name)
+                  target = base / repo / rel
+                  target.mkdir(parents=True, exist_ok=True)
+                  try:
+                      raw = get(item["download_url"])
+                      zf = zipfile.ZipFile(io.BytesIO(raw))
+                      names = [n for n in zf.namelist() if not n.endswith("/")]
+                      markers = {
+                          "AndroidManifest.xml": [n for n in names if n.lower().endswith("androidmanifest.xml")],
+                          "Gradle settings": [n for n in names if re.search(r"(^|/)settings\.gradle(\.kts)?$", n, re.I)],
+                          "Gradle app build": [n for n in names if re.search(r"(^|/)app/build\.gradle(\.kts)?$", n, re.I)],
+                          "Flutter pubspec": [n for n in names if n.lower().endswith("pubspec.yaml")],
+                          "Rust Cargo": [n for n in names if n.lower().endswith("cargo.toml")],
+                          "Web entry": [n for n in names if n.lower().endswith("index.html")],
+                          "Build scripts": [n for n in names if re.search(r"(build.*\.sh|gradlew|fastlane|.*\.yml)$", n, re.I)],
+                      }
+                      top = sorted(set(n.split("/")[0] for n in names))
+                      zf.extractall(target / "extracted")
+                      report += [f"### {name}", f"- Archive bytes: {len(raw)}", f"- Files: {len(names)}",
+                                 f"- Top-level entries: {', '.join(top[:30])}"]
+                      for label, vals in markers.items():
+                          if vals:
+                              report.append(f"- {label}: {len(vals)}")
+                              report.extend([f"  - {p}" for p in vals[:8]])
+                      report.append("")
+                      details.append({"repo": repo, "archive": name, "bytes": len(raw), "files": len(names), "top": top, "markers": markers})
+                  except Exception as e:
+                      report += [f"### {name}", f"- Audit error: {type(e).__name__}: {e}", ""]
+          (base / "inventory.md").write_text("\n".join(report), encoding="utf-8")
+          (base / "inventory.json").write_text(json.dumps(details, ensure_ascii=False, indent=2), encoding="utf-8")
+          print("\n".join(report))
+          PY
+      - name: Upload archive inventory and extracted sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: account-app-inventory-and-sources
+          path: account-app-inventory/
+          if-no-files-found: error
+          retention-days: 30
