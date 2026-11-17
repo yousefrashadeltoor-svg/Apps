@@ -1,0 +1,113 @@
+name: Apps repository audit
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/apps-audit.yml'
+      - '*.zip'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: write
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Extract and inventory every app archive
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, zipfile, hashlib, json, pathlib, re
+          root = pathlib.Path.cwd()
+          out = root / 'audit-output'
+          extracted = out / 'extracted'
+          extracted.mkdir(parents=True, exist_ok=True)
+          report = {
+              "repository": "yousefrashadeltoor-svg/Apps",
+              "archives": [],
+              "projects": [],
+              "errors": []
+          }
+          markers = {
+              "android_manifest": "AndroidManifest.xml",
+              "gradle_wrapper": "gradlew",
+              "gradle_build": "build.gradle",
+              "gradle_kts": "build.gradle.kts",
+              "settings_gradle": "settings.gradle",
+              "settings_gradle_kts": "settings.gradle.kts",
+              "package_json": "package.json",
+              "capacitor_config": "capacitor.config",
+              "flutter_manifest": "pubspec.yaml",
+              "cordova_config": "config.xml"
+          }
+          for archive in sorted(root.glob('*.zip')):
+              raw = archive.read_bytes()
+              info = {
+                  "archive": archive.name,
+                  "bytes": len(raw),
+                  "sha256": hashlib.sha256(raw).hexdigest(),
+                  "entries": [],
+                  "root_entries": [],
+                  "markers": {},
+                  "extraction_error": None
+              }
+              target = extracted / archive.stem.replace('/', '_')
+              target.mkdir(parents=True, exist_ok=True)
+              try:
+                  with zipfile.ZipFile(archive) as z:
+                      names = z.namelist()
+                      info["entries"] = names[:5000]
+                      info["root_entries"] = sorted({n.split('/')[0] for n in names if n})
+                      for marker, suffix in markers.items():
+                          found = [n for n in names if pathlib.PurePosixPath(n).name.lower() == suffix.lower()]
+                          info["markers"][marker] = found[:100]
+                      for item in z.infolist():
+                          p = pathlib.PurePosixPath(item.filename)
+                          if p.is_absolute() or '..' in p.parts:
+                              report["errors"].append({"archive": archive.name, "entry": item.filename, "error": "unsafe path skipped"})
+                              continue
+                          if item.is_dir():
+                              continue
+                          dest = target.joinpath(*p.parts)
+                          dest.parent.mkdir(parents=True, exist_ok=True)
+                          with z.open(item) as src, open(dest, 'wb') as dst:
+                              dst.write(src.read())
+              except Exception as e:
+                  info["extraction_error"] = repr(e)
+                  report["errors"].append({"archive": archive.name, "error": repr(e)})
+              report["archives"].append(info)
+          # Identify Android Gradle project roots and useful project manifests.
+          for base, dirs, files in os.walk(extracted):
+              dirs[:] = [d for d in dirs if d not in {'.git', '.gradle', 'build', 'node_modules'}]
+              here = pathlib.Path(base)
+              if any(n in files for n in ('settings.gradle','settings.gradle.kts','build.gradle','build.gradle.kts','gradlew','AndroidManifest.xml','pubspec.yaml','package.json')):
+                  rel = str(here.relative_to(extracted))
+                  item = {"path": rel, "files": sorted(files)[:120]}
+                  for fname in ('settings.gradle','settings.gradle.kts','build.gradle','build.gradle.kts','gradle.properties','gradle-wrapper.properties','package.json','pubspec.yaml','capacitor.config.json','capacitor.config.ts'):
+                      p = here / fname
+                      if p.is_file():
+                          try: item[fname] = p.read_text(errors='replace')[:30000]
+                          except Exception: pass
+                  report["projects"].append(item)
+          (out / 'inventory.json').write_text(json.dumps(report, indent=2, ensure_ascii=False))
+          lines = ["# Apps repository archive audit", "", f"Archives: {len(report['archives'])}", f"Detected project marker directories: {len(report['projects'])}", ""]
+          for a in report['archives']:
+              lines += [f"## {a['archive']}", f"- Size: {a['bytes']} bytes", f"- SHA-256: {a['sha256']}", f"- Top-level entries: {', '.join(a['root_entries'][:40]) or '(empty)'}", f"- Extraction error: {a['extraction_error'] or 'none'}", "- Project markers:"]
+              for k,v in a['markers'].items():
+                  if v: lines.append(f"  - {k}: {', '.join(v[:20])}")
+              lines.append("")
+          lines += ["## Detected project directories", ""]
+          for p in report['projects']:
+              lines += [f"### {p['path']}", f"- Files: {', '.join(p['files'][:50])}", ""]
+          (out / 'inventory.md').write_text("\n".join(lines))
+          print((out / 'inventory.md').read_text())
+          PY
+      - name: Upload extracted source and inventory
+        uses: actions/upload-artifact@v4
+        with:
+          name: apps-audit-source
+          path: audit-output/
+          if-no-files-found: error
+          retention-days: 7
