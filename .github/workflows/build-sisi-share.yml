@@ -1,0 +1,537 @@
+name: Build SISI Share Android
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-sisi-share.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - name: Install Android build components
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Create native Android app project
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p sisishare/app/src/main/java/com/sisi/share sisishare/app/src/main/res/values
+          cat > sisishare/settings.gradle.kts <<'GRADLE'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "SISIShare"
+          include(":app")
+          GRADLE
+          cat > sisishare/build.gradle.kts <<'GRADLE'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+          }
+          GRADLE
+          cat > sisishare/gradle.properties <<'GRADLE'
+          org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          GRADLE
+          cat > sisishare/app/build.gradle.kts <<'GRADLE'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.sisi.share"
+              compileSdk = 35
+              defaultConfig {
+                  applicationId = "com.sisi.share"
+                  minSdk = 24
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "1.0.0"
+              }
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                      signingConfig = signingConfigs.getByName("debug")
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          GRADLE
+          cat > sisishare/app/src/main/AndroidManifest.xml <<'XML'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+              <application
+                  android:allowBackup="false"
+                  android:label="SISI Share"
+                  android:supportsRtl="true"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@style/SisiTheme">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="keyboardHidden|orientation|screenSize"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          XML
+          cat > sisishare/app/src/main/res/values/styles.xml <<'XML'
+          <resources>
+              <style name="SisiTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+                  <item name="android:fontFamily">sans</item>
+                  <item name="android:colorAccent">#36D6B0</item>
+                  <item name="android:statusBarColor">#0B1220</item>
+                  <item name="android:navigationBarColor">#0B1220</item>
+                  <item name="android:windowLightStatusBar">false</item>
+                  <item name="android:windowBackground">#0B1220</item>
+              </style>
+          </resources>
+          XML
+          cat > sisishare/app/src/main/java/com/sisi/share/MainActivity.kt <<'KOTLIN'
+          package com.sisi.share
+
+          import android.app.Activity
+          import android.content.ContentValues
+          import android.content.Intent
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Environment
+          import android.provider.MediaStore
+          import android.provider.OpenableColumns
+          import android.graphics.Color
+          import android.view.Gravity
+          import android.view.View
+          import android.widget.*
+          import java.io.*
+          import java.net.*
+          import java.security.MessageDigest
+          import java.security.SecureRandom
+          import java.util.Collections
+          import java.util.concurrent.Executors
+
+          class MainActivity : Activity() {
+              private val io = Executors.newCachedThreadPool()
+              private var server: ServerSocket? = null
+              private lateinit var target: EditText
+              private lateinit var pin: EditText
+              private lateinit var status: TextView
+              private lateinit var addresses: TextView
+              private var fileUri: Uri? = null
+              private var fileName = ""
+              private var fileSize = -1L
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  window.statusBarColor = Color.rgb(11, 18, 32)
+                  window.navigationBarColor = Color.rgb(11, 18, 32)
+                  val scroll = ScrollView(this)
+                  scroll.setBackgroundColor(Color.rgb(11, 18, 32))
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(22, 26, 22, 28)
+                      layoutDirection = View.LAYOUT_DIRECTION_RTL
+                  }
+                  scroll.addView(root)
+                  setContentView(scroll)
+
+                  fun label(value: String, size: Float = 14f, color: Int = Color.WHITE, bold: Boolean = false) =
+                      TextView(this).apply {
+                          text = value
+                          textSize = size
+                          setTextColor(color)
+                          if (bold) setTypeface(null, android.graphics.Typeface.BOLD)
+                          setPadding(0, 8, 0, 8)
+                      }
+                  fun button(value: String) = Button(this).apply {
+                      text = value
+                      isAllCaps = false
+                      textSize = 15f
+                  }
+                  fun field(hintText: String, numeric: Boolean = false) = EditText(this).apply {
+                      hint = hintText
+                      textSize = 15f
+                      setTextColor(Color.WHITE)
+                      setHintTextColor(Color.LTGRAY)
+                      setPadding(14, 10, 14, 10)
+                      textDirection = View.TEXT_DIRECTION_LTR
+                      if (numeric) inputType = android.text.InputType.TYPE_CLASS_NUMBER
+                  }
+                  root.addView(label("SISI SHARE", 25f, Color.rgb(54, 214, 176), true))
+                  root.addView(label("نقل ملفات حقيقي بين هاتفين على شبكة محلية", 14f, Color.LTGRAY))
+                  root.addView(label("01 · استقبال الملفات", 18f, Color.WHITE, true))
+                  root.addView(label("شغّل الاستقبال على الهاتف ده، وشارك العنوان ورمز الاقتران مع الهاتف المرسل.", 13f, Color.LTGRAY))
+                  addresses = label("العنوان ورمز الاقتران هيظهروا هنا بعد التشغيل.", 14f, Color.WHITE, true)
+                  addresses.setTextIsSelectable(true)
+                  root.addView(addresses)
+                  val receive = button("تشغيل الاستقبال")
+                  root.addView(receive, LinearLayout.LayoutParams(-1, -2))
+                  val stop = button("إيقاف الاستقبال")
+                  root.addView(stop, LinearLayout.LayoutParams(-1, -2))
+                  root.addView(label("02 · إرسال ملف", 18f, Color.WHITE, true))
+                  root.addView(label("اكتب عنوان الهاتف المستقبل ورمز الاقتران، ثم اختار الملف.", 13f, Color.LTGRAY))
+                  root.addView(label("عنوان الهاتف المستقبل", 13f, Color.LTGRAY))
+                  target = field("مثال: 192.168.1.5 أو 192.168.1.5:8988")
+                  root.addView(target, LinearLayout.LayoutParams(-1, -2))
+                  root.addView(label("رمز الاقتران (6 أرقام)", 13f, Color.LTGRAY))
+                  pin = field("000000", true)
+                  root.addView(pin, LinearLayout.LayoutParams(-1, -2))
+                  val pick = button("اختيار ملف من الهاتف")
+                  root.addView(pick, LinearLayout.LayoutParams(-1, -2))
+                  val send = button("إرسال الملف الآن")
+                  root.addView(send, LinearLayout.LayoutParams(-1, -2))
+                  status = label("جاهز", 14f, Color.rgb(54, 214, 176), true)
+                  root.addView(status)
+                  root.addView(label("لازم الهاتفين يكونوا على نفس شبكة Wi‑Fi أو نقطة اتصال. خليك فاتح التطبيق أثناء النقل، واستخدم شبكة خاصة موثوقة.", 12f, Color.LTGRAY))
+
+                  receive.setOnClickListener { startReceiver() }
+                  stop.setOnClickListener { stopReceiver() }
+                  pick.setOnClickListener {
+                      val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                          addCategory(Intent.CATEGORY_OPENABLE)
+                          type = "*/*"
+                      }
+                      startActivityForResult(intent, 40)
+                  }
+                  send.setOnClickListener { sendFile() }
+              }
+
+              private fun startReceiver() {
+                  if (server != null) return
+                  val pairing = "%06d".format(SecureRandom().nextInt(1_000_000))
+                  status.text = "جاري تشغيل الاستقبال..."
+                  io.execute {
+                      try {
+                          val listener = ServerSocket(8988)
+                          server = listener
+                          val found = localAddresses()
+                          runOnUiThread {
+                              addresses.text = "العناوين: " + found.joinToString("  |  ") { it + ":8988" } +
+                                  "\nرمز الاقتران: " + pairing +
+                                  "\nالحفظ في Download/SISI Share"
+                              status.text = if (found.isEmpty()) "الخادم يعمل، لكن لم يظهر عنوان شبكة محلية." else "الاستقبال يعمل على المنفذ 8988"
+                          }
+                          while (!listener.isClosed) {
+                              val socket = listener.accept()
+                              io.execute { receive(socket, pairing) }
+                          }
+                      } catch (e: Exception) {
+                          if (server?.isClosed != true) runOnUiThread { status.text = "تعذر تشغيل الاستقبال: " + (e.message ?: "خطأ شبكة") }
+                      }
+                  }
+              }
+
+              private fun stopReceiver() {
+                  try { server?.close() } catch (_: Exception) {}
+                  server = null
+                  if (::status.isInitialized) status.text = "تم إيقاف الاستقبال"
+                  if (::addresses.isInitialized) addresses.text = "العنوان ورمز الاقتران هيظهروا هنا بعد التشغيل."
+              }
+
+              private fun receive(socket: Socket, pairing: String) {
+                  socket.use { client ->
+                      try {
+                          client.soTimeout = 15 * 60 * 1000
+                          if (!privateIpv4(client.inetAddress)) {
+                              reply(client, 403, "اتصال غير مسموح")
+                              return
+                          }
+                          val input = BufferedInputStream(client.getInputStream())
+                          fun readHeaderLine(): String? {
+                              val bytes = ByteArrayOutputStream()
+                              while (bytes.size() < 8192) {
+                                  val next = input.read()
+                                  if (next < 0) return if (bytes.size() == 0) null else bytes.toString("UTF-8")
+                                  if (next == 10) break
+                                  if (next != 13) bytes.write(next)
+                              }
+                              return bytes.toString("UTF-8")
+                          }
+                          val first = readHeaderLine() ?: return
+                          val firstParts = first.split(" ")
+                          if (firstParts.size < 2 || firstParts[0] != "POST" || !firstParts[1].startsWith("/upload?name=")) {
+                              reply(client, 404, "المسار غير موجود")
+                              return
+                          }
+                          val headers = mutableMapOf<String, String>()
+                          while (true) {
+                              val line = readHeaderLine() ?: break
+                              if (line.isEmpty()) break
+                              val colon = line.indexOf(':')
+                              if (colon > 0) headers[line.substring(0, colon).trim().lowercase()] = line.substring(colon + 1).trim()
+                          }
+                          val receivedPin = headers["x-sisi-pin"].orEmpty()
+                          if (!MessageDigest.isEqual(pairing.toByteArray(), receivedPin.toByteArray())) {
+                              reply(client, 401, "رمز الاقتران غير صحيح")
+                              return
+                          }
+                          val length = headers["content-length"]?.toLongOrNull() ?: -1L
+                          if (length < 0 || length > MAX_BYTES) {
+                              reply(client, 413, "حجم الملف غير مدعوم")
+                              return
+                          }
+                          val encoded = firstParts[1].substringAfter("/upload?name=").substringBefore('&')
+                          val decoded = try { URLDecoder.decode(encoded, "UTF-8") } catch (_: Exception) { "received-file" }
+                          val name = safeName(decoded)
+                          saveIncoming(input, name, length)
+                          reply(client, 200, "تم استقبال الملف: " + name)
+                          runOnUiThread { status.text = "تم استقبال " + name }
+                      } catch (e: Exception) {
+                          try { reply(client, 500, "فشل الاستقبال") } catch (_: Exception) {}
+                          runOnUiThread { status.text = "فشل الاستقبال: " + (e.message ?: "خطأ") }
+                      }
+                  }
+              }
+
+              private fun saveIncoming(input: InputStream, name: String, length: Long) {
+                  var pending: Uri? = null
+                  var legacy: File? = null
+                  val output: OutputStream = if (Build.VERSION.SDK_INT >= 29) {
+                      val values = ContentValues().apply {
+                          put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                          put(MediaStore.MediaColumns.MIME_TYPE, "application/octet-stream")
+                          put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/SISI Share")
+                          put(MediaStore.MediaColumns.IS_PENDING, 1)
+                      }
+                      pending = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                          ?: throw IOException("تعذر إنشاء ملف التنزيل")
+                      contentResolver.openOutputStream(pending!!, "w") ?: throw IOException("تعذر فتح الملف")
+                  } else {
+                      val base = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: filesDir
+                      val folder = File(base, "SISI Share").apply { if (!exists()) mkdirs() }
+                      legacy = File(folder, name)
+                      FileOutputStream(legacy!!)
+                  }
+                  try {
+                      output.use {
+                          val buffer = ByteArray(64 * 1024)
+                          var left = length
+                          while (left > 0) {
+                              val count = input.read(buffer, 0, minOf(buffer.size.toLong(), left).toInt())
+                              if (count < 0) throw IOException("انقطع الاتصال قبل اكتمال الملف")
+                              it.write(buffer, 0, count)
+                              left -= count
+                          }
+                          it.flush()
+                      }
+                      if (pending != null) {
+                          val values = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
+                          contentResolver.update(pending!!, values, null, null)
+                      }
+                  } catch (e: Exception) {
+                      if (pending != null) contentResolver.delete(pending!!, null, null)
+                      legacy?.delete()
+                      throw e
+                  }
+              }
+
+              private fun sendFile() {
+                  val uri = fileUri
+                  if (uri == null) { status.text = "اختار ملف الأول"; return }
+                  val pairing = pin.text.toString().trim()
+                  if (!pairing.matches(Regex("\\d{6}"))) { status.text = "رمز الاقتران لازم يكون 6 أرقام"; return }
+                  val parts = target.text.toString().trim().split(":")
+                  if (parts.size !in 1..2) { status.text = "عنوان الجهاز غير صحيح"; return }
+                  val port = if (parts.size == 2) parts[1].toIntOrNull() ?: -1 else 8988
+                  if (port !in 1..65535 || !privateIpv4Address(parts[0])) { status.text = "اكتب عنوان IPv4 خاص على الشبكة المحلية"; return }
+                  if (fileSize < 0) { status.text = "تعذر معرفة حجم الملف"; return }
+                  status.text = "جاري الاتصال والإرسال..."
+                  io.execute {
+                      var connection: HttpURLConnection? = null
+                      try {
+                          val url = URL("http://" + parts[0] + ":" + port + "/upload?name=" + URLEncoder.encode(fileName, "UTF-8"))
+                          connection = url.openConnection() as HttpURLConnection
+                          connection.requestMethod = "POST"
+                          connection.connectTimeout = 15000
+                          connection.readTimeout = 15 * 60 * 1000
+                          connection.doOutput = true
+                          connection.setFixedLengthStreamingMode(fileSize)
+                          connection.setRequestProperty("Content-Type", "application/octet-stream")
+                          connection.setRequestProperty("X-SISI-PIN", pairing)
+                          contentResolver.openInputStream(uri).use { source ->
+                              if (source == null) throw IOException("تعذر فتح الملف")
+                              BufferedOutputStream(connection.outputStream).use { output ->
+                                  val buffer = ByteArray(64 * 1024)
+                                  var sent = 0L
+                                  while (true) {
+                                      val count = source.read(buffer)
+                                      if (count < 0) break
+                                      output.write(buffer, 0, count)
+                                      sent += count
+                                      val percent = if (fileSize == 0L) 100 else ((sent * 100) / fileSize).toInt()
+                                      runOnUiThread { status.text = "جاري الإرسال: " + percent + "%" }
+                                  }
+                                  if (sent != fileSize) throw IOException("حجم الملف اتغير أثناء الإرسال")
+                              }
+                          }
+                          val code = connection.responseCode
+                          val response = (if (code in 200..299) connection.inputStream else connection.errorStream)
+                              ?.bufferedReader()?.use { it.readText() } ?: ""
+                          if (code !in 200..299) throw IOException(response.ifBlank { "رفض الهاتف المستقبل الاتصال" })
+                          runOnUiThread { status.text = response.ifBlank { "تم الإرسال بنجاح" } }
+                      } catch (e: Exception) {
+                          runOnUiThread { status.text = "فشل الإرسال: " + (e.message ?: "تعذر الاتصال") }
+                      } finally {
+                          connection?.disconnect()
+                      }
+                  }
+              }
+
+              @Deprecated("System document picker callback")
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode != PICK_FILE || resultCode != RESULT_OK) return
+                  val uri = data?.data ?: return
+                  io.execute {
+                      var name = "shared-file"
+                      var size = -1L
+                      contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+                          if (cursor.moveToFirst()) {
+                              val n = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                              val s = cursor.getColumnIndex(OpenableColumns.SIZE)
+                              if (n >= 0) name = cursor.getString(n) ?: name
+                              if (s >= 0 && !cursor.isNull(s)) size = cursor.getLong(s)
+                          }
+                      }
+                      runOnUiThread {
+                          fileUri = uri
+                          fileName = name
+                          fileSize = size
+                          status.text = "تم اختيار " + name + if (size >= 0) " · " + humanSize(size) else " · الحجم غير معروف"
+                      }
+                  }
+              }
+
+              private fun localAddresses(): List<String> {
+                  val result = mutableListOf<String>()
+                  val interfaces = NetworkInterface.getNetworkInterfaces() ?: return emptyList()
+                  for (network in Collections.list(interfaces)) {
+                      if (!network.isUp || network.isLoopback) continue
+                      for (address in Collections.list(network.inetAddresses)) {
+                          if (address is Inet4Address && privateIpv4(address)) result.add(address.hostAddress ?: "")
+                      }
+                  }
+                  return result.filter { it.isNotBlank() }.distinct().sorted()
+              }
+
+              private fun privateIpv4Address(host: String): Boolean = try {
+                  privateIpv4(InetAddress.getByName(host))
+              } catch (_: Exception) { false }
+
+              private fun privateIpv4(address: InetAddress): Boolean {
+                  if (address !is Inet4Address || address.isLoopbackAddress || address.isAnyLocalAddress) return false
+                  val b = address.address.map { it.toInt() and 255 }
+                  return b[0] == 10 || (b[0] == 172 && b[1] in 16..31) ||
+                      (b[0] == 192 && b[1] == 168) || (b[0] == 169 && b[1] == 254)
+              }
+
+              private fun safeName(raw: String): String {
+                  val leaf = raw.substringAfterLast('/').substringAfterLast('\\')
+                  return leaf.replace(Regex("[^\\p{L}\\p{N}._ -]"), "_").trim().trim('.', ' ').take(120).ifBlank { "received-file" }
+              }
+
+              private fun reply(socket: Socket, code: Int, message: String) {
+                  val body = message.toByteArray(Charsets.UTF_8)
+                  val reason = if (code == 200) "OK" else "Error"
+                  val out = socket.getOutputStream()
+                  out.write(("HTTP/1.1 " + code + " " + reason + "\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " +
+                      body.size + "\r\nConnection: close\r\n\r\n").toByteArray(Charsets.US_ASCII))
+                  out.write(body)
+                  out.flush()
+              }
+
+              private fun humanSize(size: Long): String {
+                  if (size < 1024) return size.toString() + " B"
+                  val units = arrayOf("KB", "MB", "GB", "TB")
+                  var value = size.toDouble()
+                  var index = -1
+                  do { value /= 1024.0; index++ } while (value >= 1024 && index < units.lastIndex)
+                  return String.format(java.util.Locale.US, "%.1f %s", value, units[index])
+              }
+
+              override fun onDestroy() {
+                  stopReceiver()
+                  io.shutdownNow()
+                  super.onDestroy()
+              }
+
+              companion object {
+                  private const val PICK_FILE = 40
+                  private const val MAX_BYTES = 10L * 1024L * 1024L * 1024L
+              }
+          }
+          KOTLIN
+          cat > sisishare/README.md <<'README'
+          # SISI Share Android
+          Native Android LAN file transfer first release.
+          - Real send/receive using Android document picker and TCP/HTTP on port 8988.
+          - Six-digit pairing PIN, RFC1918/link-local IPv4 restriction, filename sanitization, and a 10 GiB receive cap.
+          - Android 10+ saves to Download/SISI Share.
+          Pair devices on the same trusted Wi-Fi or use the receiver phone hotspot. Start receive on one phone, enter its address and PIN on the sender, pick a file, then send. Keep the app open during transfers.
+          Not included in this first build: Wi-Fi Direct discovery, automatic hotspot control, encrypted transport, resume, background transfers, browser sharing, or Watch Together. The PIN is transmitted over local HTTP; use only a trusted private network. Physical-device testing is required before production release.
+          README
+          gradle wrapper --gradle-version 8.11.1 --project-dir sisishare
+          chmod +x sisishare/gradlew
+      - name: Run tests and build release APK
+        working-directory: sisishare
+        run: ./gradlew --no-daemon --stacktrace clean testDebugUnitTest assembleRelease
+      - name: Verify APK and source project
+        run: |
+          set -euo pipefail
+          APK="sisishare/app/build/outputs/apk/release/app-release.apk"
+          test -s "$APK"
+          file "$APK"
+          sha256sum "$APK"
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$APK"
+          "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$APK" | head -n 10
+          zip -qr sisi-share-source-project.zip sisishare -x 'sisishare/.gradle/*' 'sisishare/app/build/*'
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: sisi-share-release-apk
+          path: sisishare/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload source and reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sisi-share-source-and-reports
+          path: |
+            sisi-share-source-project.zip
+            sisishare/app/build/reports/
+          if-no-files-found: ignore
+          retention-days: 30
