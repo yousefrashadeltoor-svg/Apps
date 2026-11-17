@@ -373,17 +373,18 @@ jobs:
                       var connection: HttpURLConnection? = null
                       try {
                           val url = URL("http://" + parts[0] + ":" + port + "/upload?name=" + URLEncoder.encode(fileName, "UTF-8"))
-                          connection = url.openConnection() as HttpURLConnection
-                          connection.requestMethod = "POST"
-                          connection.connectTimeout = 15000
-                          connection.readTimeout = 15 * 60 * 1000
-                          connection.doOutput = true
-                          connection.setFixedLengthStreamingMode(fileSize)
-                          connection.setRequestProperty("Content-Type", "application/octet-stream")
-                          connection.setRequestProperty("X-SISI-PIN", pairing)
+                          val conn = url.openConnection() as HttpURLConnection
+                          connection = conn
+                          conn.requestMethod = "POST"
+                          conn.connectTimeout = 15000
+                          conn.readTimeout = 15 * 60 * 1000
+                          conn.doOutput = true
+                          conn.setFixedLengthStreamingMode(fileSize)
+                          conn.setRequestProperty("Content-Type", "application/octet-stream")
+                          conn.setRequestProperty("X-SISI-PIN", pairing)
                           contentResolver.openInputStream(uri).use { source ->
                               if (source == null) throw IOException("تعذر فتح الملف")
-                              BufferedOutputStream(connection.outputStream).use { output ->
+                              BufferedOutputStream(conn.outputStream).use { output ->
                                   val buffer = ByteArray(64 * 1024)
                                   var sent = 0L
                                   while (true) {
@@ -397,8 +398,8 @@ jobs:
                                   if (sent != fileSize) throw IOException("حجم الملف اتغير أثناء الإرسال")
                               }
                           }
-                          val code = connection.responseCode
-                          val response = (if (code in 200..299) connection.inputStream else connection.errorStream)
+                          val code = conn.responseCode
+                          val response = (if (code in 200..299) conn.inputStream else conn.errorStream)
                               ?.bufferedReader()?.use { it.readText() } ?: ""
                           if (code !in 200..299) throw IOException(response.ifBlank { "رفض الهاتف المستقبل الاتصال" })
                           runOnUiThread { status.text = response.ifBlank { "تم الإرسال بنجاح" } }
