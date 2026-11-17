@@ -118,6 +118,8 @@ jobs:
             echo "== $apk =="
             file "$apk"
             sha256sum "$apk"
+            "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --verbose --print-certs "$apk"
+            "$ANDROID_HOME/build-tools/35.0.0/aapt" dump badging "$apk" | head -n 8
           done
 
       - name: Upload release APKs
